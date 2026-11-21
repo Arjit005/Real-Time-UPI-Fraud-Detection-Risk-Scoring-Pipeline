@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import KpiCards from './components/KpiCards';
 import TransactionTable from './components/TransactionTable';
-import { Shield, RefreshCw, Radio, CheckCircle, AlertCircle } from 'lucide-react';
+import { Shield, RefreshCw, Radio, CheckCircle, AlertCircle, Play } from 'lucide-react';
 
 export default function App() {
   const [transactions, setTransactions] = useState([]);
@@ -9,10 +9,12 @@ export default function App() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [reviewingId, setReviewingId] = useState(null);
   const [notification, setNotification] = useState(null);
+  const [simulating, setSimulating] = useState(false);
 
+  // Calls Vercel Serverless Function /api/transactions
   const fetchTransactions = async () => {
     try {
-      const res = await fetch('/api/v1/transactions?limit=50');
+      const res = await fetch('/api/transactions?limit=50');
       if (res.ok) {
         const data = await res.json();
         setTransactions(data);
@@ -35,12 +37,13 @@ export default function App() {
   const handleReview = async (transactionId, newStatus, notes) => {
     setReviewingId(transactionId);
     try {
-      const res = await fetch(`/api/v1/transactions/${transactionId}/review`, {
+      const res = await fetch('/api/transactions', {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          transactionId,
           status: newStatus,
           reviewNotes: notes
         }),
@@ -64,6 +67,35 @@ export default function App() {
     }
   };
 
+  // Instant Web Simulator: Allows testing right from the live Vercel UI
+  const triggerSimulation = async () => {
+    setSimulating(true);
+    setNotification({ type: 'success', message: 'Simulating live UPI transactions...' });
+
+    const testTxns = [
+      { senderUpi: 'priya.patel@okaxis', receiverUpi: 'swiggy@icici', amount: 480.0, city: 'Bengaluru', deviceId: 'pixel_9' },
+      { senderUpi: 'rohit.sharma@okhdfc', receiverUpi: 'zomato@hdfcbank', amount: 1250.0, city: 'Mumbai', deviceId: 'ios_17' },
+      { senderUpi: 'teleport.attacker@oksbi', receiverUpi: 'cashout_mule@paytm', amount: 95000.0, city: 'Delhi', deviceId: 'rooted_x80' }
+    ];
+
+    try {
+      for (const t of testTxns) {
+        await fetch('/api/transactions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(t)
+        });
+      }
+      await fetchTransactions();
+      setNotification({ type: 'success', message: 'Injected 3 transactions including ₹95,000 High-Risk Outlier!' });
+    } catch (e) {
+      setNotification({ type: 'error', message: 'Simulation error: ' + e.message });
+    } finally {
+      setSimulating(false);
+      setTimeout(() => setNotification(null), 5000);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#0B0F19] text-gray-100 p-4 md:p-8">
       {/* Top Header */}
@@ -75,23 +107,33 @@ export default function App() {
           <div>
             <h1 className="text-xl md:text-2xl font-bold tracking-tight text-white flex items-center gap-2">
               UPI Real-Time Fraud Operations Center
-              <span className="text-xs font-mono font-medium px-2 py-0.5 rounded bg-blue-900/60 text-blue-300 border border-blue-700/60">
-                PROD v1.0
+              <span className="text-xs font-mono font-medium px-2 py-0.5 rounded bg-emerald-900/60 text-emerald-300 border border-emerald-700/60">
+                LIVE CLOUD
               </span>
             </h1>
             <p className="text-xs text-gray-400 mt-0.5">
-              Hybrid Risk Scoring (Sliding Window Velocity + Impossible Travel + IsolationForest ML)
+              Hybrid Risk Scoring (Velocity + Impossible Travel + IsolationForest ML) connected to Aiven Cloud
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={triggerSimulation}
+            disabled={simulating}
+            className="flex items-center gap-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-50 text-white px-3.5 py-1.5 rounded-lg text-xs font-semibold shadow-md shadow-blue-500/20 transition-all"
+            title="Inject test normal & high-risk transactions"
+          >
+            <Play className="w-3.5 h-3.5 fill-white" />
+            <span>{simulating ? 'Simulating...' : 'Simulate Traffic'}</span>
+          </button>
+
           <div className="flex items-center gap-2 bg-gray-900/90 border border-gray-800 px-3 py-1.5 rounded-lg text-xs">
             <span className="relative flex h-2.5 w-2.5">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
               <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
             </span>
-            <span className="text-gray-300 font-medium">Auto-polling (2s)</span>
+            <span className="text-gray-300 font-medium">Cloud Active (2s)</span>
             <span className="text-gray-500 font-mono text-[11px] ml-1">
               Updated: {lastUpdated || 'Connecting...'}
             </span>
@@ -137,7 +179,7 @@ export default function App() {
               Live Ingest & Risk Evaluation Stream
             </h2>
           </div>
-          <span className="text-xs text-gray-500">Showing latest 50 transactions</span>
+          <span className="text-xs text-gray-500">Showing latest 50 transactions from Aiven PostgreSQL</span>
         </div>
 
         <TransactionTable
