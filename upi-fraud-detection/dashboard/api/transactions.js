@@ -10,9 +10,10 @@ const _defaultConn = `postgres://${_u}:${_secretParts.join('')}@${_h}/${_d}?sslm
 const pool = new Pool({
   connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL || _defaultConn,
   ssl: {
-    rejectUnauthorized: false
+    rejectUnauthorized: false,
+    checkServerIdentity: () => undefined
   },
-  connectionTimeoutMillis: 5000,
+  connectionTimeoutMillis: 10000,
   idleTimeoutMillis: 30000
 });
 
