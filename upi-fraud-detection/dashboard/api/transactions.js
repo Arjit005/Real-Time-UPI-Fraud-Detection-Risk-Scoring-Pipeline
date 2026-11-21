@@ -1,17 +1,19 @@
 import { Pool } from 'pg';
 
+// Set environment variable to allow self-signed certificates in Node.js runtime
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 // Safe dynamic resolution for Aiven Cloud connection
 const _u = 'avnadmin';
 const _h = 'pg-2bc95907-arjit04554-af81.k.aivencloud.com:10456';
 const _d = 'defaultdb';
 const _secretParts = ['AVNS_', 'mYSL6qdfjYSuW0', '-j-cU'];
-const _defaultConn = `postgres://${_u}:${_secretParts.join('')}@${_h}/${_d}?sslmode=require`;
+const _defaultConn = `postgres://${_u}:${_secretParts.join('')}@${_h}/${_d}?sslmode=no-verify`;
 
 const pool = new Pool({
   connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL || _defaultConn,
   ssl: {
-    rejectUnauthorized: false,
-    checkServerIdentity: () => undefined
+    rejectUnauthorized: false
   },
   connectionTimeoutMillis: 10000,
   idleTimeoutMillis: 30000
