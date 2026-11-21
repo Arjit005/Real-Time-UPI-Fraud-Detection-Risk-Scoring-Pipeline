@@ -1,0 +1,11 @@
+{
+  "java.configuration.updateBuildConfiguration": "automatic",
+  "java.compile.nullAnalysis.mode": "automatic",
+  "java.project.sourcePaths": [
+    "upi-fraud-detection/transaction-service/src/main/java",
+    "upi-fraud-detection/transaction-service/src/test/java"
+  ],
+  "java.jdt.ls.java.home": "C:\\Program Files\\Java\\jdk-27",
+  "java.requirements.JDK21": true,
+  "python.terminal.useEnvFile": true
+}
