@@ -1,4 +1,4 @@
-# Dependencies
+# Dependencies & Environments
 node_modules/
 .venv/
 __pycache__/
@@ -7,6 +7,20 @@ __pycache__/
 target/
 *.jar
 .DS_Store
+
+# IDEs & Editors
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# Test & Coverage Caches
+.pytest_cache/
+*.pytest_cache/
+.coverage
+htmlcov/
 
 # Logs & temp
 *.log
