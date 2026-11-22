@@ -1,9 +1,10 @@
+import os
 import time
 import uuid
 import random
 import requests
 
-API_URL = "http://localhost:8080/api/v1/transactions"
+API_URL = os.getenv("TRANSACTION_API_URL", "http://localhost:8080/api/v1/transactions")
 
 CITIES = ["Bengaluru", "Mumbai", "Delhi", "Hyderabad", "Pune", "Chennai", "Kolkata", "Jaipur"]
 USERS = [
@@ -20,13 +21,19 @@ MERCHANTS = [
 
 
 def post_transaction(payload, idempotency_key=None):
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "X-API-Key": os.getenv("ANALYST_API_KEY", "")
+    }
     if idempotency_key:
         headers["Idempotency-Key"] = idempotency_key
 
     try:
         response = requests.post(API_URL, json=payload, headers=headers, timeout=5)
-        return response.status_code, response.json()
+        try:
+            return response.status_code, response.json()
+        except ValueError:
+            return response.status_code, {"error": "Non-JSON response", "text": response.text}
     except Exception as e:
         return 500, {"error": str(e)}
 
@@ -103,7 +110,7 @@ def run_simulator():
         "deviceId": travel_device
     }
     status_a, body_a = post_transaction(payload_a, str(uuid.uuid4()))
-    print(f"     Sent from Bengaluru -> HTTP {status_a}")
+    print(f"     Sent from Bengaluru -> HTTP {status_a} (Response: {body_a.get('status', body_a)})")
 
     print("  ⏳ Waiting 3 seconds (simulating instant geographical jump)...")
     time.sleep(3)
@@ -118,7 +125,7 @@ def run_simulator():
         "deviceId": travel_device
     }
     status_b, body_b = post_transaction(payload_b, str(uuid.uuid4()))
-    print(f"     Sent from Delhi -> HTTP {status_b}")
+    print(f"     Sent from Delhi -> HTTP {status_b} (Response: {body_b.get('status', body_b)})")
     print("✅ Attack Scenario 2 executed.")
     time.sleep(2)
 
@@ -147,9 +154,18 @@ def run_simulator():
 
     print("\n📊 Fetching latest 10 scored transactions from Transaction Service...")
     try:
-        res = requests.get(f"{API_URL}?limit=10", timeout=5)
+        headers = {"X-API-Key": os.getenv("ANALYST_API_KEY", "")}
+        res = requests.get(f"{API_URL}?limit=10", headers=headers, timeout=5)
         if res.ok:
-            records = res.json()
+            try:
+                records = res.json()
+            except ValueError:
+                records = None
+
+            if not isinstance(records, list):
+                print(f"⚠️ Unexpected transaction response shape: {records}")
+                return
+
             print("-" * 110)
             print(f"{'TXN ID':<10} | {'SENDER':<24} | {'AMOUNT':<10} | {'STATUS':<10} | {'RISK':<6} | {'REASON'}")
             print("-" * 110)
@@ -162,6 +178,8 @@ def run_simulator():
                 reason = r.get("flagReason", "") or "Normal"
                 print(f"{t_id:<10} | {sender:<24} | {amt:<10} | {st:<10} | {risk:<6} | {reason[:40]}")
             print("-" * 110)
+        else:
+            print(f"⚠️ Fetching transactions returned HTTP {res.status_code}: {res.text}")
     except Exception as e:
         print(f"Failed to fetch verification status: {e}")
 

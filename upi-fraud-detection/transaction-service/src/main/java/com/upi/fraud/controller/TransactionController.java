@@ -5,8 +5,10 @@ import com.upi.fraud.dto.TransactionRequest;
 import com.upi.fraud.dto.TransactionResponse;
 import com.upi.fraud.service.TransactionService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Positive;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -14,6 +16,7 @@ import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1/transactions")
+@Validated
 public class TransactionController {
 
     private final TransactionService transactionService;
@@ -32,9 +35,10 @@ public class TransactionController {
 
     @GetMapping
     public ResponseEntity<List<TransactionResponse>> getRecentTransactions(
-            @RequestParam(value = "limit", defaultValue = "50") int limit,
+            @RequestParam(value = "limit", defaultValue = "50") @Positive(message = "limit must be positive") int limit,
             @RequestParam(value = "status", required = false) String status) {
-        List<TransactionResponse> list = transactionService.getRecentTransactions(limit, status);
+        int clampedLimit = Math.max(1, Math.min(limit, 100));
+        List<TransactionResponse> list = transactionService.getRecentTransactions(clampedLimit, status);
         return ResponseEntity.ok(list);
     }
 

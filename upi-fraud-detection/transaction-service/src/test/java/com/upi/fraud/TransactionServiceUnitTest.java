@@ -53,22 +53,26 @@ public class TransactionServiceUnitTest {
                 "pixel_9"
         );
 
-        savedEntity = new TransactionEntity();
-        savedEntity.setTransactionId(UUID.randomUUID());
-        savedEntity.setSenderUpi(sampleRequest.getSenderUpi());
-        savedEntity.setReceiverUpi(sampleRequest.getReceiverUpi());
-        savedEntity.setAmount(sampleRequest.getAmount());
-        savedEntity.setCity(sampleRequest.getCity());
-        savedEntity.setDeviceId(sampleRequest.getDeviceId());
-        savedEntity.setStatus(TransactionStatus.PENDING);
-        savedEntity.setRiskScore(0);
-        savedEntity.setCreatedAt(Instant.now());
+        savedEntity = new TransactionEntity(
+                UUID.randomUUID(),
+                sampleRequest.getSenderUpi(),
+                sampleRequest.getReceiverUpi(),
+                sampleRequest.getAmount(),
+                sampleRequest.getCity(),
+                sampleRequest.getDeviceId(),
+                TransactionStatus.PENDING,
+                0,
+                null,
+                Instant.now()
+        );
     }
 
     @Test
     @DisplayName("Unit Test: New transaction is saved as PENDING, published to Kafka, and cached")
     void testProcessTransactionSuccess() {
-        when(idempotencyService.getCachedResponse("idem-123")).thenReturn(null);
+        when(idempotencyService.claimKey(eq("idem-123"), any()))
+                .thenReturn(new IdempotencyService.ClaimResult(true, "token-123", null));
+        when(idempotencyService.computePayloadHash(any())).thenReturn("samplehash");
         when(transactionRepository.save(any(TransactionEntity.class))).thenReturn(savedEntity);
 
         TransactionResponse response = transactionService.processTransaction(sampleRequest, "idem-123");
@@ -78,18 +82,34 @@ public class TransactionServiceUnitTest {
         assertEquals(new BigDecimal("450.00"), response.getAmount());
 
         verify(kafkaProducerService, times(1)).publishRawTransaction(any());
-        verify(idempotencyService, times(1)).cacheResponse(eq("idem-123"), any(TransactionResponse.class));
+        verify(idempotencyService, times(1)).cacheResponse(eq("idem-123"), any(TransactionResponse.class), eq("samplehash"), eq("token-123"));
     }
 
     @Test
     @DisplayName("Unit Test: Idempotency Key hit returns cached response with ZERO duplicate DB insert")
     void testIdempotencyKeyBlocksDuplicate() {
         TransactionResponse cached = TransactionResponse.fromEntity(savedEntity);
-        when(idempotencyService.getCachedResponse("idem-duplicate")).thenReturn(cached);
+        when(idempotencyService.claimKey(eq("idem-duplicate"), any()))
+                .thenReturn(new IdempotencyService.ClaimResult(false, null, cached));
 
         TransactionResponse result = transactionService.processTransaction(sampleRequest, "idem-duplicate");
 
         assertSame(cached, result);
+        verify(transactionRepository, never()).save(any());
+        verify(kafkaProducerService, never()).publishRawTransaction(any());
+    }
+
+    @Test
+    @DisplayName("Unit Test: Idempotency Key in progress throws 409 Conflict")
+    void testIdempotencyKeyInProgressThrowsConflict() {
+        when(idempotencyService.claimKey(eq("idem-in-progress"), any()))
+                .thenThrow(new org.springframework.web.server.ResponseStatusException(
+                        org.springframework.http.HttpStatus.CONFLICT, "Transaction is currently in progress"));
+
+        assertThrows(org.springframework.web.server.ResponseStatusException.class, () -> {
+            transactionService.processTransaction(sampleRequest, "idem-in-progress");
+        });
+
         verify(transactionRepository, never()).save(any());
         verify(kafkaProducerService, never()).publishRawTransaction(any());
     }

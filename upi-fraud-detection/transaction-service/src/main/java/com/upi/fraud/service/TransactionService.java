@@ -9,8 +9,10 @@ import com.upi.fraud.repository.TransactionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 import java.util.HashMap;
@@ -38,15 +40,22 @@ public class TransactionService {
 
     @Transactional
     public TransactionResponse processTransaction(TransactionRequest request, String idempotencyKey) {
+        String payloadHash = null;
+        String claimToken = null;
+
         if (idempotencyKey != null && !idempotencyKey.isBlank()) {
-            TransactionResponse cached = idempotencyService.getCachedResponse(idempotencyKey);
-            if (cached != null) {
-                return cached;
+            IdempotencyService.ClaimResult claimResult = idempotencyService.claimKey(idempotencyKey, request);
+            if (!claimResult.isClaimed()) {
+                if (claimResult.getCachedResponse() != null) {
+                    return claimResult.getCachedResponse();
+                }
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Transaction is currently in progress for this idempotency key. Please retry shortly.");
             }
+            claimToken = claimResult.getClaimToken();
+            payloadHash = idempotencyService.computePayloadHash(request);
         }
 
         TransactionEntity entity = new TransactionEntity();
-        entity.setTransactionId(UUID.randomUUID());
         entity.setSenderUpi(request.getSenderUpi().trim());
         entity.setReceiverUpi(request.getReceiverUpi().trim());
         entity.setAmount(request.getAmount());
@@ -57,32 +66,71 @@ public class TransactionService {
         entity.setFlagReason(null);
         entity.setCreatedAt(Instant.now());
 
-        TransactionEntity saved = transactionRepository.save(entity);
-        log.info("Saved transaction {} with status PENDING", saved.getTransactionId());
+        TransactionEntity saved;
+        try {
+            saved = transactionRepository.save(entity);
+            log.info("Saved transaction {} with status PENDING", saved.getTransactionId());
 
-        Map<String, Object> payload = new HashMap<>();
-        payload.put("transactionId", saved.getTransactionId().toString());
-        payload.put("senderUpi", saved.getSenderUpi());
-        payload.put("receiverUpi", saved.getReceiverUpi());
-        payload.put("amount", saved.getAmount().doubleValue());
-        payload.put("city", saved.getCity());
-        payload.put("deviceId", saved.getDeviceId());
-        payload.put("createdAt", saved.getCreatedAt().toString());
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("transactionId", saved.getTransactionId().toString());
+            payload.put("senderUpi", saved.getSenderUpi());
+            payload.put("receiverUpi", saved.getReceiverUpi());
+            payload.put("amount", saved.getAmount().toPlainString());
+            payload.put("city", saved.getCity());
+            payload.put("deviceId", saved.getDeviceId());
+            payload.put("createdAt", saved.getCreatedAt().toString());
 
-        kafkaProducerService.publishRawTransaction(payload);
+            // Synchronous delivery check: If Kafka streaming fails after bounded retries,
+            // exception triggers DB rollback and releases the idempotency key.
+            publishWithRetry(payload, 3);
 
-        TransactionResponse response = TransactionResponse.fromEntity(saved);
+            final TransactionResponse response = TransactionResponse.fromEntity(saved);
 
-        if (idempotencyKey != null && !idempotencyKey.isBlank()) {
-            idempotencyService.cacheResponse(idempotencyKey, response);
+            if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+                idempotencyService.cacheResponse(idempotencyKey, response, payloadHash, claimToken);
+            }
+
+            return response;
+        } catch (Exception e) {
+            if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+                idempotencyService.releaseKey(idempotencyKey, claimToken);
+            }
+            throw e;
         }
+    }
 
-        return response;
+    private void publishWithRetry(Map<String, Object> payload, int maxAttempts) {
+        int attempt = 0;
+        long backoffMs = 100L;
+        Exception lastException = null;
+
+        while (attempt < maxAttempts) {
+            attempt++;
+            try {
+                kafkaProducerService.publishRawTransaction(payload);
+                return;
+            } catch (Exception ex) {
+                lastException = ex;
+                log.warn("Kafka publish attempt {} failed for txn {}: {}", attempt, payload.get("transactionId"), ex.getMessage());
+                if (attempt < maxAttempts) {
+                    try {
+                        Thread.sleep(backoffMs);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    backoffMs *= 2;
+                }
+            }
+        }
+        log.error("CRITICAL: Failed to publish transaction {} to Kafka after {} attempts", payload.get("transactionId"), maxAttempts);
+        throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Kafka service unavailable for transaction streaming", lastException);
     }
 
     @Transactional(readOnly = true)
     public List<TransactionResponse> getRecentTransactions(int limit, String statusFilter) {
-        PageRequest pageRequest = PageRequest.of(0, Math.min(limit, 100));
+        int clampedLimit = Math.max(1, Math.min(limit, 100));
+        PageRequest pageRequest = PageRequest.of(0, clampedLimit);
         List<TransactionEntity> list;
         if (statusFilter != null && !statusFilter.isBlank() && !statusFilter.equalsIgnoreCase("ALL")) {
             try {

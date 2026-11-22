@@ -24,20 +24,25 @@ public class KafkaConsumerService {
                    groupId = "${spring.kafka.consumer.group-id:upi-transaction-group}")
     public void consumeScoredTransaction(String message) {
         try {
-            log.info("Received scored transaction message: {}", message);
             ScoredTransactionEvent event = objectMapper.readValue(message, ScoredTransactionEvent.class);
-            if (event.getTransactionId() != null) {
-                transactionService.updateScoredTransaction(
-                        event.getTransactionId(),
-                        event.getStatus() != null ? event.getStatus() : "APPROVED",
-                        event.getRiskScore() != null ? event.getRiskScore() : 0,
-                        event.getFlagReason()
-                );
-            } else {
-                log.warn("Scored event missing transactionId: {}", message);
+            if (event.getTransactionId() == null || event.getStatus() == null || event.getRiskScore() == null) {
+                log.warn("Scored event rejected due to missing required fields: transactionId={}, status={}, riskScore={}",
+                        event.getTransactionId(), event.getStatus(), event.getRiskScore());
+                throw new IllegalArgumentException("Scored event missing required fields (transactionId, status, riskScore)");
             }
+
+            log.info("Processing scored event for transactionId={}: status={}, riskScore={}",
+                    event.getTransactionId(), event.getStatus(), event.getRiskScore());
+
+            transactionService.updateScoredTransaction(
+                    event.getTransactionId(),
+                    event.getStatus(),
+                    event.getRiskScore(),
+                    event.getFlagReason()
+            );
         } catch (Exception e) {
-            log.error("Failed to process scored transaction message: {}", message, e);
+            log.error("Failed to process scored transaction: {}", e.getMessage());
+            throw new RuntimeException("Error processing scored transaction: " + e.getMessage(), e);
         }
     }
 }

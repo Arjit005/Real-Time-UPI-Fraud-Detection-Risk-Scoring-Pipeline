@@ -1,9 +1,16 @@
 import os
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv, find_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import valkey
+
+load_dotenv(find_dotenv(usecwd=True))
+# Fallback to repository root .env if running from local mono-repo workspace
+repo_env = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
+if os.path.exists(repo_env):
+    load_dotenv(repo_env)
 
 from model import get_or_load_model
 from rules import evaluate_transaction_risk
@@ -12,7 +19,7 @@ from pipeline import RiskPipelineWorker
 REDIS_HOST = os.getenv("REDIS_HOST", "valkey-2a2e80e0-arjit04554-af81.k.aivencloud.com")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "10457"))
 REDIS_USER = os.getenv("REDIS_USER", "default")
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "password")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 
 valkey_client = None
 ml_model = None
@@ -24,11 +31,25 @@ async def lifespan(app: FastAPI):
     global valkey_client, ml_model, pipeline_worker
     print("[FastAPI] Initializing Live Risk Engine Service...")
 
-    valkey_uri = f"valkeys://{REDIS_USER}:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}"
-    try:
-        valkey_client = valkey.from_url(valkey_uri)
-    except Exception:
+    if not REDIS_PASSWORD:
+        print("[FastAPI] Warning: REDIS_PASSWORD environment variable not configured.")
         valkey_client = None
+    else:
+        import urllib.parse
+        encoded_user = urllib.parse.quote_plus(REDIS_USER)
+        encoded_pass = urllib.parse.quote_plus(REDIS_PASSWORD)
+        valkey_uri = f"valkeys://{encoded_user}:{encoded_pass}@{REDIS_HOST}:{REDIS_PORT}"
+        try:
+            valkey_client = valkey.from_url(
+                valkey_uri,
+                socket_timeout=3.0,
+                socket_connect_timeout=3.0
+            )
+            valkey_client.ping()
+            print("[FastAPI] Successfully connected and pinged Valkey!")
+        except Exception as e:
+            print(f"[FastAPI] Failed to connect/ping Valkey: {e}")
+            valkey_client = None
 
     ml_model = get_or_load_model()
 
@@ -52,9 +73,15 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -78,11 +105,15 @@ def health():
     except Exception:
         pass
 
+    pipeline_alive = bool(
+        pipeline_worker and pipeline_worker.running and pipeline_worker.thread and pipeline_worker.thread.is_alive()
+    )
+    is_healthy = valkey_alive and (ml_model is not None) and pipeline_alive
     return {
-        "status": "UP",
+        "status": "UP" if is_healthy else "DEGRADED",
         "cloud_valkey_connected": valkey_alive,
         "model_loaded": ml_model is not None,
-        "kafka_pipeline_running": bool(pipeline_worker and pipeline_worker.running)
+        "kafka_pipeline_running": pipeline_alive
     }
 
 

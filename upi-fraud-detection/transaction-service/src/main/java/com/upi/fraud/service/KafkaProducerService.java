@@ -9,6 +9,7 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class KafkaProducerService {
@@ -27,20 +28,32 @@ public class KafkaProducerService {
     }
 
     public void publishRawTransaction(Map<String, Object> transactionPayload) {
+        if (transactionPayload == null) {
+            throw new IllegalArgumentException("transactionPayload cannot be null");
+        }
+        Object senderUpiObj = transactionPayload.get("senderUpi");
+        if (senderUpiObj == null || String.valueOf(senderUpiObj).trim().isEmpty()) {
+            throw new IllegalArgumentException("senderUpi is required for Kafka partition key");
+        }
+        String key = String.valueOf(senderUpiObj).trim();
         try {
-            String key = String.valueOf(transactionPayload.get("senderUpi"));
             String value = objectMapper.writeValueAsString(transactionPayload);
-            kafkaTemplate.send(rawTopic, key, value).whenComplete((result, ex) -> {
-                if (ex != null) {
-                    log.error("Failed to publish transaction {} to topic {}", key, rawTopic, ex);
-                } else {
-                    log.info("Published transaction {} to topic {} at offset {}",
-                            transactionPayload.get("transactionId"), rawTopic, result.getRecordMetadata().offset());
-                }
-            });
+            var sendResult = kafkaTemplate.send(rawTopic, key, value).get(2, TimeUnit.SECONDS);
+            log.info("Published transaction {} to topic {} at offset {}",
+                    transactionPayload.get("transactionId"), rawTopic, sendResult.getRecordMetadata().offset());
         } catch (JsonProcessingException e) {
-            log.error("Error serializing transaction payload: {}", transactionPayload, e);
+            log.error("Error serializing transaction payload for transactionId {}: {}",
+                    transactionPayload.get("transactionId"), e.getMessage());
             throw new RuntimeException("Serialization failure for Kafka message", e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.error("Kafka publish interrupted for transactionId {}: {}",
+                    transactionPayload.get("transactionId"), e.getMessage());
+            throw new RuntimeException("Kafka publish thread interrupted", e);
+        } catch (Exception e) {
+            log.error("Failed to publish transaction {} to topic {}: {}",
+                    transactionPayload.get("transactionId"), rawTopic, e.getMessage());
+            throw new RuntimeException("Kafka delivery failure", e);
         }
     }
 }

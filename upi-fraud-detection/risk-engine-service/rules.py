@@ -55,8 +55,10 @@ def check_impossible_travel(r: valkey.Valkey, sender_upi: str, current_city: str
             time_diff_mins = max(0.1, round((current_time - last_time) / 60.0, 1))
 
             if last_city and last_city.lower().strip() != current_city.lower().strip():
-                points = 50
-                reason = f"Impossible travel: {last_city} to {current_city} in {time_diff_mins} mins"
+                delta_seconds = current_time - last_time
+                if 0 <= delta_seconds <= TRAVEL_EXPIRY_SECONDS:
+                    points = 50
+                    reason = f"Impossible travel: {last_city} to {current_city} in {time_diff_mins} mins"
         except Exception as e:
             print(f"[Rules] Error parsing last travel state: {e}")
 

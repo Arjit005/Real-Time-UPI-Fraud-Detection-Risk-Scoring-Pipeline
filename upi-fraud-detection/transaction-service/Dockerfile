@@ -10,6 +10,8 @@ RUN mvn clean package -DskipTests
 # Runtime stage
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
-COPY --from=builder /app/target/transaction-service-0.0.1-SNAPSHOT.jar app.jar
+RUN adduser -S appuser
+COPY --from=builder /app/target/transaction-service-1.0.0.jar app.jar
+USER appuser
 EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "app.jar"]

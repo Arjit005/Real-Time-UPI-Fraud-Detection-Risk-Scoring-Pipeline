@@ -15,4 +15,11 @@ yarn-debug.log*
 
 # Sensitive Keys (Keep template, do not push private keys)
 .env
+*.env
 ca.pem
+
+# Build outputs
+/dist/
+/build/
+/upi-fraud-detection/dashboard/dist/
+/upi-fraud-detection/transaction-service/target/

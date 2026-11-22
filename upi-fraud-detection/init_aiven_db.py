@@ -1,13 +1,17 @@
 import psycopg2
 import os
+import sys
+from dotenv import load_dotenv, find_dotenv
 
-CONN_STR = os.getenv(
-    "SPRING_DATASOURCE_URL",
-    "postgres://avnadmin:password@pg-2bc95907-arjit04554-af81.k.aivencloud.com:10456/defaultdb?sslmode=require"
-)
+load_dotenv(find_dotenv(usecwd=True))
+
+CONN_STR = os.getenv("SPRING_DATASOURCE_URL") or os.getenv("DATABASE_URL")
+if not CONN_STR:
+    print("[Error] Missing required environment variable: SPRING_DATASOURCE_URL or DATABASE_URL")
+    sys.exit(1)
 
 try:
-    print("[Postgres] Connecting to Aiven PostgreSQL cloud instance...")
+    print("[Postgres] Connecting to PostgreSQL database...")
     conn = psycopg2.connect(CONN_STR)
     cur = conn.cursor()
 
@@ -35,3 +39,4 @@ try:
     print("\n[Postgres] Connection closed cleanly.")
 except Exception as e:
     print(f"[Error] Failed: {e}")
+    sys.exit(1)

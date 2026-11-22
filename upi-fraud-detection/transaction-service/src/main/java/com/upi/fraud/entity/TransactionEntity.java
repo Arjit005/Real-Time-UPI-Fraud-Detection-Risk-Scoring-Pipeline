@@ -79,10 +79,6 @@ public class TransactionEntity {
         return transactionId;
     }
 
-    public void setTransactionId(UUID transactionId) {
-        this.transactionId = transactionId;
-    }
-
     public String getSenderUpi() {
         return senderUpi;
     }
