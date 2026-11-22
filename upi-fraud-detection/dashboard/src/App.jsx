@@ -97,6 +97,7 @@ export default function App() {
       });
       if (res.ok) {
         const data = await res.json();
+        if (abortControllerRef.current !== controller) return;
         if (!Array.isArray(data)) {
           throw new Error('Unexpected transaction response format');
         }
@@ -105,10 +106,11 @@ export default function App() {
         setStaleError(null);
       } else {
         const errText = await res.text();
+        if (abortControllerRef.current !== controller) return;
         setStaleError(`Failed to poll latest transactions (${res.status}): ${errText}`);
       }
     } catch (err) {
-      if (err.name === 'AbortError') {
+      if (err.name === 'AbortError' || abortControllerRef.current !== controller) {
         return; // Superseded by a newer fetch
       }
       console.error('Failed to poll transactions:', err);

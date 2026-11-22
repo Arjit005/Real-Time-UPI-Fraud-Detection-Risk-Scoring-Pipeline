@@ -12,6 +12,8 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
@@ -66,12 +68,16 @@ public class TransactionService {
         entity.setFlagReason(null);
         entity.setCreatedAt(Instant.now());
 
+        final String finalIdempotencyKey = idempotencyKey;
+        final String finalPayloadHash = payloadHash;
+        final String finalClaimToken = claimToken;
+
         TransactionEntity saved;
         try {
             saved = transactionRepository.save(entity);
             log.info("Saved transaction {} with status PENDING", saved.getTransactionId());
 
-            Map<String, Object> payload = new HashMap<>();
+            final Map<String, Object> payload = new HashMap<>();
             payload.put("transactionId", saved.getTransactionId().toString());
             payload.put("senderUpi", saved.getSenderUpi());
             payload.put("receiverUpi", saved.getReceiverUpi());
@@ -80,14 +86,32 @@ public class TransactionService {
             payload.put("deviceId", saved.getDeviceId());
             payload.put("createdAt", saved.getCreatedAt().toString());
 
-            // Synchronous delivery check: If Kafka streaming fails after bounded retries,
-            // exception triggers DB rollback and releases the idempotency key.
-            publishWithRetry(payload, 3);
-
             final TransactionResponse response = TransactionResponse.fromEntity(saved);
 
-            if (idempotencyKey != null && !idempotencyKey.isBlank()) {
-                idempotencyService.cacheResponse(idempotencyKey, response, payloadHash, claimToken);
+            if (TransactionSynchronizationManager.isSynchronizationActive()) {
+                // Outbox coordination: Publish to Kafka and cache response strictly AFTER DB commit confirms
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        if (finalIdempotencyKey != null && !finalIdempotencyKey.isBlank()) {
+                            idempotencyService.cacheResponse(finalIdempotencyKey, response, finalPayloadHash, finalClaimToken);
+                        }
+                        kafkaProducerService.publishRawTransaction(payload);
+                    }
+
+                    @Override
+                    public void afterCompletion(int status) {
+                        if (status != TransactionSynchronization.STATUS_COMMITTED && finalIdempotencyKey != null && !finalIdempotencyKey.isBlank()) {
+                            idempotencyService.releaseKey(finalIdempotencyKey, finalClaimToken);
+                        }
+                    }
+                });
+            } else {
+                // Synchronous fallback (e.g. standalone test execution)
+                kafkaProducerService.publishRawTransaction(payload);
+                if (finalIdempotencyKey != null && !finalIdempotencyKey.isBlank()) {
+                    idempotencyService.cacheResponse(finalIdempotencyKey, response, finalPayloadHash, finalClaimToken);
+                }
             }
 
             return response;
@@ -97,34 +121,6 @@ public class TransactionService {
             }
             throw e;
         }
-    }
-
-    private void publishWithRetry(Map<String, Object> payload, int maxAttempts) {
-        int attempt = 0;
-        long backoffMs = 100L;
-        Exception lastException = null;
-
-        while (attempt < maxAttempts) {
-            attempt++;
-            try {
-                kafkaProducerService.publishRawTransaction(payload);
-                return;
-            } catch (Exception ex) {
-                lastException = ex;
-                log.warn("Kafka publish attempt {} failed for txn {}: {}", attempt, payload.get("transactionId"), ex.getMessage());
-                if (attempt < maxAttempts) {
-                    try {
-                        Thread.sleep(backoffMs);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                    backoffMs *= 2;
-                }
-            }
-        }
-        log.error("CRITICAL: Failed to publish transaction {} to Kafka after {} attempts", payload.get("transactionId"), maxAttempts);
-        throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Kafka service unavailable for transaction streaming", lastException);
     }
 
     @Transactional(readOnly = true)
@@ -166,6 +162,11 @@ public class TransactionService {
     @Transactional
     public void updateScoredTransaction(UUID transactionId, String statusStr, int riskScore, String flagReason) {
         transactionRepository.findById(transactionId).ifPresentOrElse(entity -> {
+            if (entity.getStatus() == TransactionStatus.APPROVED || entity.getStatus() == TransactionStatus.BLOCKED) {
+                log.info("Transaction {} already finalized with status {}, ignoring duplicate scored event",
+                        transactionId, entity.getStatus());
+                return;
+            }
             try {
                 TransactionStatus status = TransactionStatus.valueOf(statusStr.toUpperCase());
                 entity.setStatus(status);

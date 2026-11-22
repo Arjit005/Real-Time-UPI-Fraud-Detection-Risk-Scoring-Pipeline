@@ -7,9 +7,19 @@ export default function TransactionTable({ transactions = [], loading = false, o
   const [searchTerm, setSearchTerm] = useState('');
   const [expandedId, setExpandedId] = useState(null);
 
+  // Clear expanded row details if filter or search changes to prevent mismatched row details
+  React.useEffect(() => {
+    setExpandedId(null);
+  }, [filter, searchTerm]);
+
   const isRowReviewing = (id) => {
     if (reviewingIds) {
-      return reviewingIds.has(id);
+      if (typeof reviewingIds.has === 'function') {
+        return reviewingIds.has(id);
+      }
+      if (Array.isArray(reviewingIds)) {
+        return reviewingIds.includes(id);
+      }
     }
     return reviewingId === id;
   };
@@ -102,7 +112,7 @@ export default function TransactionTable({ transactions = [], loading = false, o
               </tr>
             ) : (
               filtered.map((t, idx) => {
-                const rowKey = t.transactionId || `${t.createdAt || 'row'}-${idx}`;
+                const rowKey = t.transactionId || (t.createdAt ? `${t.senderUpi || 'u'}-${t.createdAt}` : `row-${idx}`);
                 const isFlagged = t.status === 'FLAGGED';
                 const isProcessing = t.transactionId ? isRowReviewing(t.transactionId) : false;
                 const isExpanded = expandedId === rowKey;

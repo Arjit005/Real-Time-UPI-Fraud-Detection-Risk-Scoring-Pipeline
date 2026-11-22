@@ -107,6 +107,28 @@ class ReviewRequest(BaseModel):
     reviewNotes: str = ""
 
 
+CAS_DELETE_LUA = """
+local cur = redis.call('get', KEYS[1])
+if not cur then return 0 end
+local ok, data = pcall(cjson.decode, cur)
+if ok and data['claim_token'] == ARGV[1] then
+    return redis.call('del', KEYS[1])
+else
+    return 0
+end
+"""
+
+CAS_UPDATE_LUA = """
+local cur = redis.call('get', KEYS[1])
+if not cur then return 0 end
+local ok, data = pcall(cjson.decode, cur)
+if ok and data['claim_token'] == ARGV[1] then
+    return redis.call('set', KEYS[1], ARGV[2], 'EX', ARGV[3])
+else
+    return 0
+end
+"""
+
 def compute_payload_hash(req: TransactionRequest) -> str:
     amount_str = f"{req.amount:.2f}"
     raw = f"{req.senderUpi}|{req.receiverUpi}|{amount_str}|{req.city}|{req.deviceId}"
@@ -116,12 +138,13 @@ def compute_payload_hash(req: TransactionRequest) -> str:
 def create_transaction(req: TransactionRequest, idempotency_key: str = Header(None, alias="Idempotency-Key")):
     payload_hash = compute_payload_hash(req)
     idem_redis_key = f"upi:idempotency:{idempotency_key.strip()}" if idempotency_key else None
+    claim_token = str(uuid.uuid4()) if idempotency_key else None
 
-    # 1. Atomic Idempotency Claim in Valkey
+    # 1. Atomic Idempotency Claim in Valkey with unique claim_token
     if idem_redis_key:
         if not valkey_client:
             raise HTTPException(status_code=503, detail="Idempotency store unavailable")
-        initial_val = json.dumps({"payload_hash": payload_hash, "response": None})
+        initial_val = json.dumps({"claim_token": claim_token, "payload_hash": payload_hash, "response": None})
         try:
             claimed = valkey_client.set(idem_redis_key, initial_val, nx=True, ex=300)
         except Exception as e:
@@ -150,7 +173,7 @@ def create_transaction(req: TransactionRequest, idempotency_key: str = Header(No
     txn_id = str(uuid.uuid4())
     now = datetime.datetime.now(datetime.timezone.utc)
 
-    # 2. Save PENDING record and stream to Kafka inside atomic transaction boundary
+    # 2. Save PENDING record to PostgreSQL
     try:
         with get_db() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -163,71 +186,48 @@ def create_transaction(req: TransactionRequest, idempotency_key: str = Header(No
                     (txn_id, req.senderUpi, req.receiverUpi, str(req.amount), req.city, req.deviceId, now)
                 )
                 saved = cur.fetchone()
-
-                response_data = {
-                    "transactionId": str(saved["transaction_id"]),
-                    "senderUpi": saved["sender_upi"],
-                    "receiverUpi": saved["receiver_upi"],
-                    "amount": float(saved["amount"]),
-                    "city": saved["city"],
-                    "deviceId": saved["device_id"],
-                    "status": saved["status"],
-                    "riskScore": saved["risk_score"] or 0,
-                    "flagReason": saved["flag_reason"],
-                    "scoreBreakdown": saved["score_breakdown"],
-                    "createdAt": saved["created_at"].isoformat() if saved["created_at"] else now.isoformat()
-                }
-
-                # 3. Stream to Kafka with delivery confirmation callback before DB commit
-                if not kafka_producer:
-                    conn.rollback()
-                    raise HTTPException(status_code=503, detail="Kafka producer unavailable: message delivery not possible")
-
-                delivery_error = []
-                def delivery_report(err, msg):
-                    if err is not None:
-                        delivery_error.append(str(err))
-
-                try:
-                    kafka_producer.produce(
-                        "upi.transactions.raw",
-                        key=req.senderUpi.encode("utf-8"),
-                        value=json.dumps(response_data).encode("utf-8"),
-                        callback=delivery_report
-                    )
-                    remaining = kafka_producer.flush(timeout=5.0)
-                    if remaining > 0 or len(delivery_error) > 0:
-                        conn.rollback()
-                        raise HTTPException(status_code=503, detail="Kafka delivery failure: message could not be delivered to stream")
-                except HTTPException:
-                    raise
-                except Exception as k_err:
-                    conn.rollback()
-                    raise HTTPException(status_code=503, detail=f"Kafka produce error: {k_err}")
-
                 conn.commit()
-    except HTTPException:
-        if idem_redis_key and valkey_client:
-            try:
-                valkey_client.delete(idem_redis_key)
-            except Exception:
-                pass
-        raise
     except Exception as db_err:
-        if idem_redis_key and valkey_client:
+        if idem_redis_key and valkey_client and claim_token:
             try:
-                valkey_client.delete(idem_redis_key)
+                valkey_client.eval(CAS_DELETE_LUA, 1, idem_redis_key, claim_token)
             except Exception:
                 pass
         raise HTTPException(status_code=500, detail="Database error processing transaction")
 
-    # 4. Cache full response with payload hash for 24 hours on success
-    if idem_redis_key and valkey_client:
-        cached_record = {"payload_hash": payload_hash, "response": response_data}
+    response_data = {
+        "transactionId": str(saved["transaction_id"]),
+        "senderUpi": saved["sender_upi"],
+        "receiverUpi": saved["receiver_upi"],
+        "amount": float(saved["amount"]),
+        "city": saved["city"],
+        "deviceId": saved["device_id"],
+        "status": saved["status"],
+        "riskScore": saved["risk_score"] or 0,
+        "flagReason": saved["flag_reason"],
+        "scoreBreakdown": saved["score_breakdown"],
+        "createdAt": saved["created_at"].isoformat() if saved["created_at"] else now.isoformat()
+    }
+
+    # 3. Stream to Kafka post-commit with delivery logging
+    if kafka_producer:
         try:
-            valkey_client.set(idem_redis_key, json.dumps(cached_record), ex=86400)
+            kafka_producer.produce(
+                "upi.transactions.raw",
+                key=req.senderUpi.encode("utf-8"),
+                value=json.dumps(response_data).encode("utf-8")
+            )
+            kafka_producer.flush(timeout=5.0)
+        except Exception as k_err:
+            print(f"[TransactionAPI] Warning: Post-commit Kafka produce error: {k_err}")
+
+    # 4. Atomically update idempotency response with CAS claim check for 24h
+    if idem_redis_key and valkey_client and claim_token:
+        cached_record = {"claim_token": claim_token, "payload_hash": payload_hash, "response": response_data}
+        try:
+            valkey_client.eval(CAS_UPDATE_LUA, 1, idem_redis_key, claim_token, json.dumps(cached_record), 86400)
         except Exception as e:
-            print(f"[TransactionAPI] Warning: Failed to cache idempotency response in Valkey: {e}")
+            print(f"[TransactionAPI] Warning: Failed to CAS cache idempotency response in Valkey: {e}")
 
     return response_data
 

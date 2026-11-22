@@ -38,22 +38,19 @@ public class KafkaProducerService {
         String key = String.valueOf(senderUpiObj).trim();
         try {
             String value = objectMapper.writeValueAsString(transactionPayload);
-            var sendResult = kafkaTemplate.send(rawTopic, key, value).get(2, TimeUnit.SECONDS);
-            log.info("Published transaction {} to topic {} at offset {}",
-                    transactionPayload.get("transactionId"), rawTopic, sendResult.getRecordMetadata().offset());
+            kafkaTemplate.send(rawTopic, key, value).whenComplete((result, ex) -> {
+                if (ex == null) {
+                    log.info("Published transaction {} to topic {} at offset {}",
+                            transactionPayload.get("transactionId"), rawTopic, result.getRecordMetadata().offset());
+                } else {
+                    log.error("Failed async publishing transaction {} to topic {}: {}",
+                            transactionPayload.get("transactionId"), rawTopic, ex.getMessage());
+                }
+            });
         } catch (JsonProcessingException e) {
             log.error("Error serializing transaction payload for transactionId {}: {}",
                     transactionPayload.get("transactionId"), e.getMessage());
             throw new RuntimeException("Serialization failure for Kafka message", e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.error("Kafka publish interrupted for transactionId {}: {}",
-                    transactionPayload.get("transactionId"), e.getMessage());
-            throw new RuntimeException("Kafka publish thread interrupted", e);
-        } catch (Exception e) {
-            log.error("Failed to publish transaction {} to topic {}: {}",
-                    transactionPayload.get("transactionId"), rawTopic, e.getMessage());
-            throw new RuntimeException("Kafka delivery failure", e);
         }
     }
 }

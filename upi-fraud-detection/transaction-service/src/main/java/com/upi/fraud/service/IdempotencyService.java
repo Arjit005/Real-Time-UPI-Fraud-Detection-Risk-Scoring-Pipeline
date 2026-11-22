@@ -57,6 +57,9 @@ public class IdempotencyService {
     @Value("${app.idempotency.ttl-hours:24}")
     private long ttlHours;
 
+    @Value("${app.idempotency.claim-lease-duration-minutes:10}")
+    private int claimLeaseMinutes = 10;
+
     @PostConstruct
     public void validateConfig() {
         if (ttlHours <= 0 || ttlHours > 720) {
@@ -168,8 +171,9 @@ public class IdempotencyService {
 
         Boolean claimed = false;
         try {
-            // In-progress claim has a bounded 5-minute lock duration
-            claimed = redisTemplate.opsForValue().setIfAbsent(key, initialJson, Duration.ofMinutes(5));
+            // In-progress claim has a bounded lease duration
+            Duration claimLeaseDuration = Duration.ofMinutes(claimLeaseMinutes);
+            claimed = redisTemplate.opsForValue().setIfAbsent(key, initialJson, claimLeaseDuration);
         } catch (Exception e) {
             log.error("Redis unavailable during idempotency claim for key: {}", cleanKey, e);
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Idempotency store temporarily unavailable");
@@ -184,20 +188,15 @@ public class IdempotencyService {
         try {
             String existingJson = redisTemplate.opsForValue().get(key);
             if (existingJson != null) {
-                CachedIdempotencyRecord existingRecord = null;
-                try {
-                    existingRecord = objectMapper.readValue(existingJson, CachedIdempotencyRecord.class);
-                } catch (Exception parseEx) {
-                    try {
-                        TransactionResponse legacyResponse = objectMapper.readValue(existingJson, TransactionResponse.class);
-                        if (legacyResponse.getTransactionId() != null) {
-                            log.info("Idempotency legacy cache HIT for key: {}", idempotencyKey);
-                            return new ClaimResult(false, null, legacyResponse);
-                        }
-                    } catch (Exception ignored) {}
-                    throw parseEx;
+                com.fasterxml.jackson.databind.JsonNode rootNode = objectMapper.readTree(existingJson);
+                // Check if JSON has legacy TransactionResponse shape (e.g. has 'transactionId' and lacks 'claimToken')
+                if (rootNode.has("transactionId") && !rootNode.has("claimToken")) {
+                    TransactionResponse legacyResponse = objectMapper.treeToValue(rootNode, TransactionResponse.class);
+                    log.info("Idempotency legacy cache HIT for key: {}", idempotencyKey);
+                    return new ClaimResult(false, null, legacyResponse);
                 }
 
+                CachedIdempotencyRecord existingRecord = objectMapper.treeToValue(rootNode, CachedIdempotencyRecord.class);
                 if (existingRecord != null) {
                     if (existingRecord.getPayloadHash() != null && !existingRecord.getPayloadHash().equals(currentHash)) {
                         log.warn("Idempotency key {} reused with different payload! Stored: {}, Current: {}",

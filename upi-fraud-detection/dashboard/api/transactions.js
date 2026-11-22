@@ -41,20 +41,31 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // Fail-closed authentication check on ALL non-OPTIONS requests
+  // Fail-closed authentication check on ALL non-OPTIONS requests with scoped permissions
   const requiredApiKey = process.env.ANALYST_API_KEY;
+  const requiredReviewKey = process.env.REVIEW_API_KEY || requiredApiKey;
   if (!requiredApiKey) {
     return res.status(503).json({ error: 'Service Unavailable: Authentication service not configured' });
   }
 
   const apiKeyHeader = req.headers['x-api-key'];
+  const reviewKeyHeader = req.headers['x-review-key'];
   const authHeader = req.headers['authorization'];
   const bearerToken = authHeader && authHeader.toLowerCase().startsWith('bearer ') ? authHeader.substring(7).trim() : null;
   const providedKey = apiKeyHeader || bearerToken || authHeader;
 
+  if (req.method === 'PATCH') {
+    // Review action requires analyst review key scope
+    const providedReviewKey = reviewKeyHeader || providedKey;
+    if (!providedReviewKey || providedReviewKey !== requiredReviewKey) {
+      return res.status(403).json({ error: 'Forbidden: Insufficient privileges for transaction review' });
+    }
+  } else {
+    // Ingestion and Read endpoints require standard API key
     if (!providedKey || providedKey !== requiredApiKey) {
       return res.status(401).json({ error: 'Unauthorized: Invalid or missing API key' });
     }
+  }
 
   try {
     // 1. GET: Fetch transactions directly from Aiven PostgreSQL
@@ -214,10 +225,10 @@ export default async function handler(req, res) {
 
         const previousStatus = checkResult.rows[0].status;
 
-        // One-way state transition validation: finalized reviews cannot be undone
-        if (previousStatus === 'BLOCKED') {
+        // One-way state transition validation: finalized reviews (BLOCKED or APPROVED) cannot be undone
+        if (previousStatus === 'BLOCKED' || previousStatus === 'APPROVED') {
           await client.query('ROLLBACK');
-          return res.status(400).json({ error: 'Cannot transition a BLOCKED transaction: terminal state' });
+          return res.status(400).json({ error: `Cannot transition a finalized ${previousStatus} transaction: terminal state` });
         }
         if (previousStatus === normalizedStatus) {
           await client.query('ROLLBACK');

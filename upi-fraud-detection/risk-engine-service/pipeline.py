@@ -195,6 +195,14 @@ class RiskPipelineWorker:
                     txn_id = txn.get("transactionId", "unknown")
                     sender = txn.get("senderUpi", "unknown")
 
+                    # Idempotent scoring check: Deduplicate using Redis SETNX
+                    if txn_id != "unknown" and self.r:
+                        is_new = self.r.set(f"upi:processed_txn:{txn_id}", "1", nx=True, ex=86400)
+                        if not is_new:
+                            print(f"[Pipeline] Deduplication: Transaction {txn_id} already processed, skipping.")
+                            self._commit_with_retry(msg, f"duplicate txn {txn_id}")
+                            continue
+
                     # Evaluate risk with Explainable AI & Dynamic Baseline
                     try:
                         scored = evaluate_transaction_risk(self.r, self.model, txn)
